@@ -1,5 +1,7 @@
 # NKON Battery Analysis Toolkit
 
+[![License: CC BY 4.0](https://img.shields.io/badge/License-CC%20BY%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
+
 A set of tools to scrape, analyse, visualise, and interactively explore battery listings from [nkon.nl](https://www.nkon.nl).
 
 ```
