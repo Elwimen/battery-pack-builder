@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Scraped & exported data
+*.json
+*.csv
+*.html
+
+# Exported markdown tables (keep README)
+*.md
+!README.md
