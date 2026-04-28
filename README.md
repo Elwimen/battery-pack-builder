@@ -8,6 +8,7 @@ A set of tools to scrape, analyse, visualise, and interactively explore battery 
 scrape.py   →   chart.py        (visualise scraped data)
 scrape.py   →   builder.py      (find optimal pack configurations)
                 builder.py  →   tui.py   (interactive explorer)
+                                tui.py   →  price-curve chart (p key)
 ```
 
 ---
@@ -54,27 +55,27 @@ python scrape.py https://www.nkon.nl/en/rechargeable/li-ion.html --out-of-stock 
 
 ### Output columns
 
-| Column                    | Description                                        |
-|---------------------------|----------------------------------------------------|
-| Name                      | Full product name                                  |
-| Brand                     | Manufacturer                                       |
-| Chemistry                 | e.g. LiFePO4, Li-ion, NiMH                        |
-| Size                      | e.g. 18650, 21700, prismatic                       |
-| Grade                     | OEM / retail / etc.                                |
-| V                         | Nominal voltage (V)                                |
-| Ah                        | Capacity (Ah)                                      |
-| Wh                        | Energy (V × Ah)                                    |
-| Price €                   | Unit price incl. VAT                               |
-| Wh/€                      | Energy per euro (higher = better)                  |
-| €/Wh                      | Cost per Wh                                        |
-| Wh/kg                     | Gravimetric energy density                         |
-| Wh/L                      | Volumetric energy density                          |
-| C-rate                    | Max continuous discharge rate                      |
-| Disch A                   | Max continuous discharge current (A)               |
-| Weight g                  | Cell weight (g)                                    |
-| Vol L                     | Cell volume (L)                                    |
+| Column                    | Description                                               |
+|---------------------------|-----------------------------------------------------------|
+| Name                      | Full product name                                         |
+| Brand                     | Manufacturer                                              |
+| Chemistry                 | e.g. LiFePO4, Li-ion, NiMH                               |
+| Size                      | e.g. 18650, 21700, prismatic                              |
+| Grade                     | OEM / retail / etc.                                       |
+| V                         | Nominal voltage (V)                                       |
+| Ah                        | Capacity (Ah)                                             |
+| Wh                        | Energy (V × Ah)                                           |
+| Price €                   | Unit price incl. VAT                                      |
+| Wh/€                      | Energy per euro (higher = better)                         |
+| €/Wh                      | Cost per Wh                                               |
+| Wh/kg                     | Gravimetric energy density                                |
+| Wh/L                      | Volumetric energy density                                 |
+| C-rate                    | Max continuous discharge rate                             |
+| Disch A                   | Max continuous discharge current (A)                      |
+| Weight g                  | Cell weight (g)                                           |
+| Vol L                     | Cell volume (L)                                           |
 | Bulk pricing (qty×€/unit) | Tiered quantity break prices, e.g. `10×€4.50 / 50×€4.20` |
-| In stock                  | yes / no                                           |
+| In stock                  | yes / no                                                  |
 
 ---
 
@@ -159,15 +160,15 @@ python tui.py batteries.json
 ┌──────────────────────────────┬────────────────────────────────────────────┐
 │  Sidebar                     │  Results table (click header to sort)      │
 │                              │                                            │
-│  Voltage (V)                 │  # │Config │Cells│Pack V│Total €│Tier saved│
-│  Target Wh                   │  1 │15S×3P │  45 │ 48.0 │ €1420 │  €18.00  │
-│  V tolerance (%)             │  2 │15S×1P │  15 │ 48.0 │  €520 │    —     │
-│  Wh overshoot cap (%)        │  ...                                       │
-│  Chemistry  [✓ LiFePO4]      ├────────────────────────────────────────────┤
-│             [✓ Li-ion ]      │  Detail panel (selected row)               │
-│             [  NiMH   ]      │  Cell · config · pack specs · tier info    │
+│  Voltage (V)         4 8     │  # │Config │Cells│Pack V│Total €│Tier saved│
+│  Target Wh        4 0 9 6   │  1 │15S×3P │  45 │ 48.0 │ €1420 │  €18.00  │
+│  V tolerance (%)      1 5   │  2 │15S×1P │  15 │ 48.0 │  €520 │    —     │
+│  Wh overshoot cap % 1 0 0   │  ...                                       │
+│  Chemistry  [✓ LiFePO4    ] ├────────────────────────────────────────────┤
+│             [✓ Li-ion     ] │  Detail panel (selected row)               │
+│             [  NiMH       ] │  Cell · config · pack specs · tier info    │
 │  In stock only  [ ]          │                                            │
-│  [Build]  [Clear]            │                                            │
+│  [Build]        [Clear]      │                                            │
 │                              │                                            │
 │  ── Custom column ──         │                                            │
 │  Column A  [Total €      ]   │                                            │
@@ -184,10 +185,12 @@ python tui.py batteries.json
 |---|---|
 | `b` | Build / rebuild with current parameters |
 | `v` | Open column visibility picker |
-| `e` | Export HTML (Plotly charts) |
+| `p` | Generate price-curve chart (pack cost vs Wh) |
+| `e` | Export HTML (Plotly pack charts) |
 | `c` | Export CSV |
 | `m` | Export Markdown |
 | `q` | Quit |
+| `↑` / `↓` on a numeric input | Increment / decrement the digit under the cursor |
 | Click column header | Sort by that column (click again to reverse) |
 | Click row | Show full details in the bottom panel |
 
@@ -200,6 +203,10 @@ python tui.py batteries.json
 - **Chemistry** — checklist; tick any combination of chemistries to filter (all ticked = no filter)
 - **In stock only** — exclude out-of-stock cells
 
+### Numeric input stepping
+
+Place the cursor on any digit in a numeric field and press **↑** / **↓** to increment or decrement that digit's place value. Carry and borrow propagate automatically — stepping up `9` in the hundreds place of `4900` gives `5000`; stepping down past `0` borrows from the next digit.
+
 ### Tier pricing
 
 The **Tier saved** column shows how much cheaper the pack is compared to buying at unit price, because the configuration requires enough cells to qualify for a bulk discount. The detail panel shows the exact tier threshold applied and the per-cell price reduction.
@@ -207,6 +214,24 @@ The **Tier saved** column shows how much cheaper the pack is compared to buying 
 ### Column visibility
 
 Press `v` to open a checklist of all table columns. Untick any column to hide it. Changes take effect immediately and are persisted to the config file.
+
+### Price-curve chart
+
+Press `p` to generate a dark-themed interactive HTML chart — **pack cost vs required Wh** — using the current voltage, tolerance, chemistry filter, and stock settings as a baseline.
+
+Each cell that fits the voltage target becomes a **staircase trace**: price stays flat until another parallel string is needed, then steps up. Tier pricing is applied at every step. The dashed vertical line marks the current target Wh.
+
+Traces use a three-level style system to stay distinguishable even with hundreds of cells:
+
+| Traces | Colour | Line style | Marker |
+|--------|--------|------------|--------|
+| 1 – 16 | 16 distinct colours | solid | — |
+| 17 – 64 | colours cycle | dash / dot / dashdot | — |
+| 65+ | colours + dashes cycle | — | chevron / diamond / cross |
+
+Click any legend entry to hide or show that trace.
+
+Saved as `{stem}_price_curve_{V}V.html` next to the data file.
 
 ### Custom column
 
@@ -223,14 +248,13 @@ Select Column A, Operation, and Column B, then press **Apply**. The table sorts 
 
 ### Persistent settings
 
-All sidebar values, column visibility, and chemistry filter are saved automatically to `{data_stem}.config.json` next to the data file. They are restored on the next launch.
+All sidebar values, column visibility, and chemistry filter are saved automatically to `{data_stem}.config.json` next to the data file and restored on the next launch.
 
 ### Export filenames
 
-Exports are saved alongside the input data file:
-
 ```
 {stem}_pack_{V}V_{Wh}Wh.html / .csv / .md
+{stem}_price_curve_{V}V.html
 ```
 
 ---
@@ -244,11 +268,14 @@ python scrape.py https://www.nkon.nl/en/rechargeable.html -o batteries.json
 # 2. Explore interactively — filter chemistry, sort by Tier saved, build custom columns
 python tui.py batteries.json
 
-# 3. Or visualise the raw scraped data
+# 3. Inside the TUI, press p to generate a price-curve chart for the current config
+#    Press e/c/m to export pack results as HTML / CSV / Markdown
+
+# 4. Or visualise the raw scraped data directly
 python scrape.py ... -o batteries.csv
 python chart.py batteries.csv
 
-# 4. Build a specific pack non-interactively
+# 5. Build a specific pack non-interactively
 python builder.py batteries.json --voltage 48 --wh 4096 \
     --in-stock -o pack_48v_4kwh.html
 ```

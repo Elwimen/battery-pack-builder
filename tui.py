@@ -21,7 +21,7 @@ from textual.widgets import (
 from textual.screen import ModalScreen
 
 sys.path.insert(0, str(Path(__file__).parent))
-from builder import load, find_packs, render_html, render_csv, render_markdown
+from builder import load, find_packs, render_html, render_csv, render_markdown, render_price_curve
 
 
 # ── numeric columns available for custom expression ───────────────────────────
@@ -38,7 +38,8 @@ NUMERIC_COLS = [
     ("Wh/L",         "wh_per_l"),
     ("€/cell",       "cell_price"),
     ("Unit €/cell",  "cell_price_unit"),
-    ("Tier savings", "tier_savings"),
+    ("Tier savings",    "tier_savings"),
+    ("Wh to next tier","wh_to_next_tier"),
     ("Cells",        "n_total"),
     ("Pack V",       "v_pack"),
     ("Pack Ah",      "ah_pack"),
@@ -67,8 +68,9 @@ COLUMNS = [
     ("Pack Wh",    "wh_pack",       8),
     ("€/cell",     "cell_price",    8),
     ("Total €",    "price_total",   9),
-    ("Tier saved", "tier_savings",  10),
-    ("Wh/€",       "wh_per_eur",    7),
+    ("Tier saved", "tier_savings",    10),
+    ("→ next tier","wh_to_next_tier", 11),
+    ("Wh/€",       "wh_per_eur",      7),
     ("Disch A",    "pack_disch_a",  8),
     ("Max kW",     "pack_max_kw",   7),
     ("Wh/kg",      "wh_per_kg",     7),
@@ -121,6 +123,7 @@ def row_cells(i: int, p: dict,
         f"€{_f(p['cell_price'])}",
         f"€{_f(p['price_total'])}",
         f"€{_f(p['tier_savings'])}" if p.get("tier_savings") else "—",
+        _f(p["wh_to_next_tier"], 0) if p.get("wh_to_next_tier") is not None else ("max" if p.get("tiers") else "—"),
         _f(p["wh_per_eur"]),
         _f(p["pack_disch_a"], 0),
         _f(p["pack_max_kw"]),
@@ -172,6 +175,70 @@ def pack_detail(p: dict) -> str:
     if p.get("url"):
         lines.append(f"URL: {p['url']}")
     return "\n".join(lines)
+
+
+# ── smart numeric input ───────────────────────────────────────────────────────
+
+class SmartInput(Input):
+    """Input that increments/decrements the digit under the cursor with Up/Down.
+
+    Carry and borrow propagate to more significant digits automatically.
+    Value is clamped at 0; cursor position is preserved after each step.
+    """
+
+    def _step_value(self, direction: int) -> None:
+        val = self.value
+        if not val:
+            return
+        try:
+            current = float(val)
+        except ValueError:
+            return
+
+        # Find the effective cursor position, skipping non-digit chars
+        pos = max(0, min(self.cursor_position, len(val) - 1))
+        while pos < len(val) and not val[pos].isdigit():
+            pos += 1
+        if pos >= len(val):  # cursor past end or on trailing non-digit — use last digit
+            pos = len(val) - 1
+            while pos >= 0 and not val[pos].isdigit():
+                pos -= 1
+        if pos < 0:
+            return
+
+        dot = val.find(".")
+        if dot == -1:
+            step = float(10 ** (len(val) - pos - 1))
+        elif pos < dot:
+            step = float(10 ** (dot - pos - 1))
+        else:
+            step = 10.0 ** (-(pos - dot))
+
+        new_val = max(0.0, current + direction * step)
+
+        if dot == -1:
+            new_str = str(int(round(new_val)))
+        else:
+            decimals = max(0, len(val) - dot - 1)
+            new_str = f"{new_val:.{decimals}f}"
+
+        # Cursor shifts right if the string grew (e.g. 999 → 1000)
+        target = self.cursor_position + (len(new_str) - len(val))
+        self.value = new_str
+        self.call_after_refresh(self._restore_cursor, target)
+
+    def _restore_cursor(self, pos: int) -> None:
+        self.cursor_position = max(0, min(pos, len(self.value)))
+
+    def on_key(self, event) -> None:
+        if event.key == "up":
+            self._step_value(1)
+            event.stop()
+            event.prevent_default()
+        elif event.key == "down":
+            self._step_value(-1)
+            event.stop()
+            event.prevent_default()
 
 
 # ── export modal ──────────────────────────────────────────────────────────────
@@ -308,6 +375,7 @@ class PackBuilderApp(App):
         Binding("q",      "quit",        "Quit"),
         Binding("b",      "build",       "Build"),
         Binding("v",      "columns",     "Columns"),
+        Binding("p",      "price_curve", "Price curve"),
         Binding("e",      "export_html", "Export HTML"),
         Binding("c",      "export_csv",  "Export CSV"),
         Binding("m",      "export_md",   "Export MD"),
@@ -344,13 +412,13 @@ class PackBuilderApp(App):
             with ScrollableContainer(id="sidebar"):
                 # ── pack parameters ──
                 yield Label("Voltage (V)")
-                yield Input(value=str(self.target_v),  id="v-input",     placeholder="e.g. 48")
+                yield SmartInput(value=f"{self.target_v:g}",  id="v-input",     placeholder="e.g. 48")
                 yield Label("Target Wh")
-                yield Input(value=str(self.target_wh), id="wh-input",    placeholder="e.g. 4096")
+                yield SmartInput(value=f"{self.target_wh:g}", id="wh-input",    placeholder="e.g. 4096")
                 yield Label("V tolerance (%)")
-                yield Input(value=str(self.v_tol),     id="vtol-input",  placeholder="e.g. 15")
+                yield SmartInput(value=f"{self.v_tol:g}",     id="vtol-input",  placeholder="e.g. 15")
                 yield Label("Wh overshoot cap (%)")
-                yield Input(value=str(self.wh_tol),    id="whtol-input", placeholder="e.g. 100")
+                yield SmartInput(value=f"{self.wh_tol:g}",    id="whtol-input", placeholder="e.g. 100")
                 yield Label("Chemistry")
                 yield SelectionList(id="chem-select")
                 with Horizontal(id="stock-row"):
@@ -654,6 +722,25 @@ class PackBuilderApp(App):
     def action_export_html(self) -> None: self._export("html")
     def action_export_csv(self)  -> None: self._export("csv")
     def action_export_md(self)   -> None: self._export("md")
+
+    def action_price_curve(self) -> None:
+        if not self._cells:
+            self.push_screen(ExportModal("No cells loaded — run Build first."))
+            return
+        out = (Path(self._data_path).parent /
+               f"{Path(self._data_path).stem}_price_curve_{int(self.target_v)}V.html")
+        try:
+            html = render_price_curve(
+                self._cells,
+                self.target_v, self.target_wh,
+                self.v_tol / 100,
+                self.in_stock,
+                self._chem_filter or None,
+            )
+            out.write_text(html)
+            self.push_screen(ExportModal(f"Price curve saved to:\n{out}"))
+        except Exception as e:
+            self.push_screen(ExportModal(f"Failed:\n{e}"))
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

@@ -193,6 +193,11 @@ def find_packs(cells: list[dict], target_v: float, target_wh: float,
         pack_disch_a = round(np_ * cell_disch, 1)        if cell_disch else None
         pack_max_kw  = round(pack_disch_a * v_pack / 1000, 2) if pack_disch_a else None
 
+        # Distance to next price tier: negative = need more cells, None = already at max
+        tiers_sorted = sorted(cell.get("tiers") or [], key=lambda t: t["qty"])
+        next_tier    = next((t for t in tiers_sorted if t["qty"] > n_total), None)
+        wh_to_next_tier = round((n_total - next_tier["qty"]) * wh, 1) if next_tier else None
+
         results.append({
             "name":             cell.get("name", "—"),
             "brand":            cell.get("brand") or "—",
@@ -207,6 +212,7 @@ def find_packs(cells: list[dict], target_v: float, target_wh: float,
             "cell_price_unit":  cell_price_unit,
             "tier_qty":         tier_qty,
             "tier_savings":     tier_savings,
+            "wh_to_next_tier":  wh_to_next_tier,
             "tiers":            cell.get("tiers") or [],
             "ns":               ns,
             "np":               np_,
@@ -271,8 +277,9 @@ def _cols():
         ("Pack Wh",      lambda i, p: f(p["wh_pack"], 0)),
         ("€/cell",       lambda i, p: f(p["cell_price"])),
         ("Unit €/cell",  lambda i, p: f(p["cell_price_unit"])),
-        ("Tier savings €",lambda i, p: f(p["tier_savings"]) if p.get("tier_savings") else "—"),
-        ("Tier applied", lambda i, p: _tier_note(p)),
+        ("Tier savings €",  lambda i, p: f(p["tier_savings"]) if p.get("tier_savings") else "—"),
+        ("Wh to next tier", lambda i, p: f(p["wh_to_next_tier"], 0) if p.get("wh_to_next_tier") is not None else "max"),
+        ("Tier applied",    lambda i, p: _tier_note(p)),
         ("Total €",      lambda i, p: f(p["price_total"])),
         ("Pack Wh/€",    lambda i, p: f(p["wh_per_eur"])),
         ("Pack kg",      lambda i, p: f(p["weight_kg"])),
@@ -352,6 +359,8 @@ def render_html(packs: list[dict], target_v: float, target_wh: float,
         ]
         if p.get("tier_savings"):
             lines.append(f"Tier savings: €{p['tier_savings']:.2f} vs unit price")
+        if p.get("wh_to_next_tier") is not None:
+            lines.append(f"Next tier: {p['wh_to_next_tier']:.0f} Wh away")
         if p["pack_disch_a"]:
             lines.append(f"Max discharge: {p['pack_disch_a']:.0f} A  /  {p['pack_max_kw']:.1f} kW")
         if p["weight_kg"]:
@@ -589,6 +598,162 @@ def render_html(packs: list[dict], target_v: float, target_wh: float,
         f"<div id='panels'>{panels}</div>"
         f"{PAGE_SCRIPT}</body></html>"
     )
+
+
+# ── price-curve chart ─────────────────────────────────────────────────────────
+
+# 16 perceptually distinct colours (Paul Tol's palette, dark-background safe)
+_CURVE_COLORS = [
+    "#4477AA", "#EE6677", "#228833", "#CCBB44",
+    "#66CCEE", "#AA3377", "#BBBBBB", "#FFFFFF",
+    "#332288", "#117733", "#44AA99", "#88CCEE",
+    "#DDCC77", "#CC6677", "#882255", "#AA4499",
+]
+_CURVE_DASHES   = ["solid", "dash", "dot", "dashdot"]
+_CURVE_MARKERS  = [
+    "triangle-up", "triangle-down", "triangle-left", "triangle-right",
+    "diamond", "cross", "x", "star",
+]
+
+
+def _curve_style(i: int) -> tuple[str, str, str | None]:
+    """Return (color, dash, marker_symbol) for trace index i.
+
+    Levels:
+      0–15   : 16 colours, solid line, no marker
+      16–63  : colours cycle, dash varies (4 dashes × 16 colours)
+      64+    : colours + dashes cycle, chevron marker added
+    """
+    color  = _CURVE_COLORS[i % 16]
+    dash   = _CURVE_DASHES[(i // 16) % 4]
+    mk_idx = i // 64          # 0 = no marker, 1+ = use marker
+    marker = _CURVE_MARKERS[(mk_idx - 1) % len(_CURVE_MARKERS)] if mk_idx else None
+    return color, dash, marker
+
+
+def render_price_curve(cells: list[dict], target_v: float, target_wh: float,
+                       v_tol: float, in_stock_only: bool,
+                       chem_filter: set | None = None) -> str:
+    """Return a full-page HTML Plotly chart: pack cost vs required Wh.
+
+    Each valid cell becomes a staircase trace — price is flat until another
+    parallel string is needed, then steps up.  Tier pricing is applied at
+    every step based on the actual cell count required.
+
+    Style hierarchy (so each trace stays visually distinct):
+      1. 16 perceptually distinct colours
+      2. 4 line dashes  (activated after 16 traces)
+      3. 8 chevron/marker symbols  (activated after 64 traces)
+    """
+    import plotly.graph_objects as go
+
+    PLOTLY_CONFIG = {"responsive": True, "displaylogo": False}
+
+    filtered = [
+        c for c in cells
+        if (not in_stock_only or c.get("in_stock"))
+        and (not chem_filter or (c.get("chemistry") or "Unknown") in chem_filter)
+    ]
+
+    wh_max = target_wh * 3
+    fig    = go.Figure()
+    ti     = 0   # trace index for style assignment
+
+    for cell in filtered:
+        v     = cell.get("voltage_v")
+        ah    = cell.get("capacity_ah")
+        name  = cell.get("name") or "?"
+
+        if not all([v, ah, cell.get("price_incl")]):
+            continue
+
+        ns = round(target_v / v)
+        if ns < 1:
+            continue
+        v_pack = ns * v
+        if abs(v_pack - target_v) / target_v > v_tol:
+            continue
+
+        # Build staircase points: xs[0]=0 then one point per Np step.
+        # With Plotly line_shape="hv": segment [xs[i] → xs[i+1]] is drawn
+        # at height ys[i], so ys is shifted — ys[0]=price(Np=1) covers x=0..wh1,
+        # ys[1]=price(Np=2) covers x=wh1..wh2, etc.
+        xs   = [0.0]
+        ys   = []
+        tips = []
+
+        np_ = 1
+        while True:
+            wh_pack = v_pack * np_ * ah
+            n_total = ns * np_
+            cp, tq  = _best_tier_price(cell, n_total)
+            price   = round(n_total * cp, 2)
+            tier_note = (f"tier ≥{tq}: €{cp:.2f}/cell" if tq
+                         else f"unit: €{cp:.2f}/cell")
+
+            ys.append(price)
+            xs.append(wh_pack)
+            tips.append(
+                f"<b>{name[:55]}</b><br>"
+                f"Config: {ns}S×{np_}P  ({n_total} cells)<br>"
+                f"Pack Wh: {wh_pack:.0f}  |  <b>€{price:.2f}</b><br>"
+                f"{tier_note}"
+            )
+
+            if wh_pack >= wh_max:
+                break
+            np_ += 1
+
+        if not ys:
+            continue
+
+        # Duplicate last entry so xs and ys are equal length
+        ys.append(ys[-1])
+        tips.append(tips[-1])
+
+        color, dash, marker = _curve_style(ti)
+        ti += 1
+
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys,
+            mode="lines+markers" if marker else "lines",
+            line=dict(shape="hv", color=color, width=1.5, dash=dash),
+            marker=dict(symbol=marker or "circle", size=6, color=color,
+                        opacity=0.8) if marker else dict(size=0),
+            name=name[:55],
+            customdata=tips,
+            hovertemplate="%{customdata}<extra></extra>",
+            opacity=0.85,
+        ))
+
+    # Mark the current target Wh
+    fig.add_vline(
+        x=target_wh, line_dash="dash", line_color="#aaa", line_width=1.5,
+        annotation_text=f"Target {target_wh:,.0f} Wh",
+        annotation_position="top right",
+        annotation_font=dict(color="#ccc", size=11),
+    )
+
+    fig.update_layout(
+        template="plotly_dark",
+        autosize=True,
+        title=dict(
+            text=(f"Pack cost vs required Wh  —  {target_v} V  "
+                  f"| V-tol ±{v_tol*100:.0f}%"
+                  + ("  | in-stock only" if in_stock_only else "")
+                  + (f"  | {', '.join(sorted(chem_filter))}" if chem_filter else "")),
+            x=0,
+        ),
+        xaxis_title="Required pack energy (Wh)",
+        yaxis_title="Total pack cost (€)",
+        legend=dict(x=1.01, xanchor="left", y=1, yanchor="top",
+                    groupclick="toggleitem"),
+        font=dict(family="system-ui, sans-serif", size=12),
+        margin=dict(l=60, r=200, t=60, b=50),
+        hovermode="x",
+    )
+
+    return fig.to_html(full_html=True, include_plotlyjs=True, config=PLOTLY_CONFIG)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
