@@ -193,10 +193,20 @@ def find_packs(cells: list[dict], target_v: float, target_wh: float,
         pack_disch_a = round(np_ * cell_disch, 1)        if cell_disch else None
         pack_max_kw  = round(pack_disch_a * v_pack / 1000, 2) if pack_disch_a else None
 
-        # Distance to next price tier: negative = need more cells, None = already at max
+        # Distance to next price tier (None = already at max tier)
         tiers_sorted = sorted(cell.get("tiers") or [], key=lambda t: t["qty"])
         next_tier    = next((t for t in tiers_sorted if t["qty"] > n_total), None)
-        wh_to_next_tier = round((n_total - next_tier["qty"]) * wh, 1) if next_tier else None
+        if next_tier:
+            _cells_gap        = next_tier["qty"] - n_total
+            wh_to_next_tier    = round(_cells_gap * wh, 1)
+            cells_to_next_tier = next_tier["qty"]
+            np_to_next_tier    = math.ceil(_cells_gap / ns)
+            ns_to_next_tier    = math.ceil(_cells_gap / np_)
+        else:
+            wh_to_next_tier    = None
+            cells_to_next_tier = None
+            np_to_next_tier    = None
+            ns_to_next_tier    = None
 
         results.append({
             "name":             cell.get("name", "—"),
@@ -212,7 +222,10 @@ def find_packs(cells: list[dict], target_v: float, target_wh: float,
             "cell_price_unit":  cell_price_unit,
             "tier_qty":         tier_qty,
             "tier_savings":     tier_savings,
-            "wh_to_next_tier":  wh_to_next_tier,
+            "wh_to_next_tier":   wh_to_next_tier,
+            "cells_to_next_tier": cells_to_next_tier,
+            "np_to_next_tier":   np_to_next_tier,
+            "ns_to_next_tier":   ns_to_next_tier,
             "tiers":            cell.get("tiers") or [],
             "ns":               ns,
             "np":               np_,
@@ -674,13 +687,14 @@ def render_price_curve(cells: list[dict], target_v: float, target_wh: float,
         if abs(v_pack - target_v) / target_v > v_tol:
             continue
 
-        # Build staircase points: xs[0]=0 then one point per Np step.
-        # With Plotly line_shape="hv": segment [xs[i] → xs[i+1]] is drawn
-        # at height ys[i], so ys is shifted — ys[0]=price(Np=1) covers x=0..wh1,
-        # ys[1]=price(Np=2) covers x=wh1..wh2, etc.
-        xs   = [0.0]
+        # Build explicit step endpoints so hover tracks anywhere along each
+        # flat segment (not just at the data points used by line_shape="hv").
+        # Each step i contributes two points: (wh_prev, price_i) and
+        # (wh_curr, price_i), giving a real data point every hover can snap to.
+        xs   = []
         ys   = []
         tips = []
+        wh_prev = 0.0
 
         np_ = 1
         while True:
@@ -690,26 +704,23 @@ def render_price_curve(cells: list[dict], target_v: float, target_wh: float,
             price   = round(n_total * cp, 2)
             tier_note = (f"tier ≥{tq}: €{cp:.2f}/cell" if tq
                          else f"unit: €{cp:.2f}/cell")
-
-            ys.append(price)
-            xs.append(wh_pack)
-            tips.append(
+            tip = (
                 f"<b>{name[:55]}</b><br>"
                 f"Config: {ns}S×{np_}P  ({n_total} cells)<br>"
                 f"Pack Wh: {wh_pack:.0f}  |  <b>€{price:.2f}</b><br>"
                 f"{tier_note}"
             )
+            xs.extend([wh_prev, wh_pack])
+            ys.extend([price, price])
+            tips.extend([tip, tip])
+            wh_prev = wh_pack
 
             if wh_pack >= wh_max:
                 break
             np_ += 1
 
-        if not ys:
+        if not xs:
             continue
-
-        # Duplicate last entry so xs and ys are equal length
-        ys.append(ys[-1])
-        tips.append(tips[-1])
 
         color, dash, marker = _curve_style(ti)
         ti += 1
@@ -717,7 +728,7 @@ def render_price_curve(cells: list[dict], target_v: float, target_wh: float,
         fig.add_trace(go.Scatter(
             x=xs, y=ys,
             mode="lines+markers" if marker else "lines",
-            line=dict(shape="hv", color=color, width=1.5, dash=dash),
+            line=dict(color=color, width=1.5, dash=dash),
             marker=dict(symbol=marker or "circle", size=6, color=color,
                         opacity=0.8) if marker else dict(size=0),
             name=name[:55],

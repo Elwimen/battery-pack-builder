@@ -39,7 +39,10 @@ NUMERIC_COLS = [
     ("€/cell",       "cell_price"),
     ("Unit €/cell",  "cell_price_unit"),
     ("Tier savings",    "tier_savings"),
-    ("Wh to next tier","wh_to_next_tier"),
+    ("Wh to next tier",    "wh_to_next_tier"),
+    ("Cells to next tier", "cells_to_next_tier"),
+    ("+Np to next tier",   "np_to_next_tier"),
+    ("+Ns to next tier",   "ns_to_next_tier"),
     ("Cells",        "n_total"),
     ("Pack V",       "v_pack"),
     ("Pack Ah",      "ah_pack"),
@@ -83,6 +86,22 @@ COLUMNS = [
 ]
 
 
+# ── next-tier display modes ───────────────────────────────────────────────────
+
+NEXT_TIER_MODES = [
+    ("Wh to tier",     "wh"),
+    ("Total cells",    "cells"),
+    ("Extra +Np",      "np"),
+    ("Extra +Ns",      "ns"),
+]
+_NEXT_TIER_LABEL = {
+    "wh":    "→ Tier Wh",
+    "cells": "→ Tier cells",
+    "np":    "→ Tier +Np",
+    "ns":    "→ Tier +Ns",
+}
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _f(v, d=2):
@@ -108,10 +127,27 @@ def _custom_label(col_a: str, op: str, col_b: str) -> str:
     return f"{_COL_LABEL.get(col_a, col_a)} {sym} {_COL_LABEL.get(col_b, col_b)}"
 
 
+def _next_tier_cell(p: dict, mode: str) -> str:
+    has_tiers = bool(p.get("tiers"))
+    if mode == "wh":
+        v = p.get("wh_to_next_tier")
+        return _f(v, 0) if v is not None else ("max" if has_tiers else "—")
+    if mode == "cells":
+        v = p.get("cells_to_next_tier")
+        return str(v) if v is not None else ("max" if has_tiers else "—")
+    if mode == "np":
+        v = p.get("np_to_next_tier")
+        return f"+{v}P" if v is not None else ("max" if has_tiers else "—")
+    # mode == "ns"
+    v = p.get("ns_to_next_tier")
+    return f"+{v}S" if v is not None else ("max" if has_tiers else "—")
+
+
 def row_cells(i: int, p: dict,
               hidden_cols: set | None = None,
               custom_val: float | None = None,
-              custom_label: str | None = None) -> list[str]:
+              custom_label: str | None = None,
+              next_tier_mode: str = "wh") -> list[str]:
     hidden_cols = hidden_cols or set()
     all_vals = [
         str(i),
@@ -123,7 +159,7 @@ def row_cells(i: int, p: dict,
         f"€{_f(p['cell_price'])}",
         f"€{_f(p['price_total'])}",
         f"€{_f(p['tier_savings'])}" if p.get("tier_savings") else "—",
-        _f(p["wh_to_next_tier"], 0) if p.get("wh_to_next_tier") is not None else ("max" if p.get("tiers") else "—"),
+        _next_tier_cell(p, next_tier_mode),
         _f(p["wh_per_eur"]),
         _f(p["pack_disch_a"], 0),
         _f(p["pack_max_kw"]),
@@ -396,8 +432,9 @@ class PackBuilderApp(App):
         self._sort_col     = "price_total"
         self._sort_asc     = True
         self._selected     : dict | None = None
-        self._chem_filter  : str | None = None
-        self._hidden_cols  : set[str] = set()
+        self._chem_filter    : str | None = None
+        self._hidden_cols    : set[str] = set()
+        self._next_tier_mode : str = "wh"
         self._custom_col_a : str | None = None
         self._custom_op    : str | None = "/"
         self._custom_col_b : str | None = None
@@ -424,6 +461,12 @@ class PackBuilderApp(App):
                 with Horizontal(id="stock-row"):
                     yield Label("In stock only", id="stock-label")
                     yield Switch(value=self.in_stock, id="stock-switch")
+                yield Label("→ Next tier shows")
+                yield Select(
+                    options=NEXT_TIER_MODES,
+                    value=self._next_tier_mode,
+                    id="next-tier-mode",
+                )
                 with Horizontal(id="btn-row"):
                     yield Button("Build", id="build-btn", variant="primary")
                     yield Button("Clear", id="clear-btn")
@@ -483,7 +526,8 @@ class PackBuilderApp(App):
             if "v_tol"       in cfg: self.v_tol        = float(cfg["v_tol"])
             if "wh_tol"      in cfg: self.wh_tol       = float(cfg["wh_tol"])
             if "in_stock"    in cfg: self.in_stock      = bool(cfg["in_stock"])
-            if "chem_filter" in cfg: self._chem_filter  = set(cfg["chem_filter"] or [])
+            if "chem_filter"     in cfg: self._chem_filter    = set(cfg["chem_filter"] or [])
+            if "next_tier_mode"  in cfg: self._next_tier_mode  = cfg["next_tier_mode"]
         except Exception:
             pass
 
@@ -495,7 +539,8 @@ class PackBuilderApp(App):
             "v_tol":        self.v_tol,
             "wh_tol":       self.wh_tol,
             "in_stock":     self.in_stock,
-            "chem_filter":  sorted(self._chem_filter),
+            "chem_filter":   sorted(self._chem_filter),
+            "next_tier_mode": self._next_tier_mode,
         }
         try:
             self._config_path().write_text(json.dumps(cfg, indent=2))
@@ -532,7 +577,8 @@ class PackBuilderApp(App):
         table.clear(columns=True)
         for label, key, width in COLUMNS:
             if key not in self._hidden_cols:
-                table.add_column(label, key=key, width=width)
+                col_label = _NEXT_TIER_LABEL.get(self._next_tier_mode, label) if key == "wh_to_next_tier" else label
+                table.add_column(col_label, key=key, width=width)
         if self._custom_active and self._custom_col_a and self._custom_col_b:
             lbl = _custom_label(self._custom_col_a, self._custom_op or "/", self._custom_col_b)
             table.add_column(lbl, key="__custom__", width=14)
@@ -547,7 +593,7 @@ class PackBuilderApp(App):
                 cval   = _compute_custom(p, self._custom_col_a,
                                          self._custom_op or "/", self._custom_col_b)
                 clabel = "__custom__"
-            table.add_row(*row_cells(i, p, self._hidden_cols, cval, clabel), key=str(i - 1))
+            table.add_row(*row_cells(i, p, self._hidden_cols, cval, clabel, self._next_tier_mode), key=str(i - 1))
 
     # ── build ─────────────────────────────────────────────────────────────────
 
@@ -636,6 +682,12 @@ class PackBuilderApp(App):
             self._custom_op = None if event.value is Select.BLANK else str(event.value)
         elif event.select.id == "col-b-select":
             self._custom_col_b = None if event.value is Select.BLANK else str(event.value)
+        elif event.select.id == "next-tier-mode":
+            if event.value is not Select.BLANK:
+                self._next_tier_mode = str(event.value)
+                self._init_table()
+                self._refresh_table(self._packs)
+                self._save_config()
         # custom col selects: don't rebuild automatically — wait for Apply button
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
